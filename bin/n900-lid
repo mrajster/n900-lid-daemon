@@ -97,8 +97,10 @@ start_timer() {
 			sleep 60; t=$((t+60))
 			evtest --query '"$EVDEV"' EV_SW SW_KEYPAD_SLIDE
 			[ "$?" -eq 10 ] && exit 0
-			# guards: never sleep under an SSH session or a running upgrade
-			if netstat -tn 2>/dev/null | grep ":22 " | grep -q ESTABLISHED || pgrep -x apk >/dev/null 2>&1; then
+			# guards: never sleep under an SSH session, a running upgrade,
+			# or on external power (s2idle wedges the USB PHY/charger chain;
+			# plugged-in needs no battery savings anyway)
+			if netstat -tn 2>/dev/null | grep ":22 " | grep -q ESTABLISHED || pgrep -x apk >/dev/null 2>&1 || [ "$(cat /sys/class/power_supply/isp1704/online 2>/dev/null)" = "1" ]; then
 				# guarded fallback: old deep-idle path, WiFi off after WIFI_OFF_AFTER
 				if [ $t -ge '"$WIFI_OFF_AFTER"' ] && [ ! -f /run/n900-lid/wifi.off ] && ! netstat -tn 2>/dev/null | grep ":22 " | grep -q ESTABLISHED; then
 					logger -t n900-lid "closed, guarded: wifi off (deep idle)"
