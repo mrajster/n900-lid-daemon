@@ -112,6 +112,8 @@ start_timer() {
 				sync
 				echo freeze > /sys/power/state
 				logger -t n900-lid "woke from s2idle"
+				# bq2415x charger latches an error if its watchdog kick raced suspend
+				echo auto > /sys/class/power_supply/bq24150a-0/mode 2>/dev/null
 				evtest --query '"$EVDEV"' EV_SW SW_KEYPAD_SLIDE
 				[ "$?" -eq 10 ] && exit 0
 				t=0
