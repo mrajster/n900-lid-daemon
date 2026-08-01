@@ -1,0 +1,18 @@
+#!/bin/sh
+# Remove pmOS i3 pieces that fight n900-lid for screen/lock policy.
+# Idempotent; runs every boot so package upgrades can't silently revert it.
+
+# screenlock.sh: don't re-disable touch, don't set 3s DPMS
+if grep -q "xset dpms 0 0 3" /usr/bin/screenlock.sh 2>/dev/null; then
+	sed -i -e "s|xset dpms 0 0 3|xset dpms 0 0 0|" \
+	       -e "s|xinput disable \"TSC2005 touchscreen\"|: # n900-lid owns touch policy|" \
+	       /usr/bin/screenlock.sh
+fi
+
+# xautolock + screenlock keybinding out of the xdg i3 config
+if grep -qE "^exec --no-startup-id xautolock|^bindsym --release XF86ScreenSaver" /etc/xdg/i3/config 2>/dev/null; then
+	sed -i -e "s|^exec --no-startup-id xautolock.*|# xautolock removed: n900-lid owns lock/blank/suspend policy|" \
+	       -e "s|^bindsym --release XF86ScreenSaver.*|# screenlock key unbound: n900-lid owns lock/screen policy|" \
+	       /etc/xdg/i3/config
+fi
+exit 0

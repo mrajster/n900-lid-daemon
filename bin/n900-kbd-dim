@@ -1,0 +1,15 @@
+#!/bin/sh
+# One-shot: waits until KBD_ON_SECS since the last keypress (timestamp file
+# refreshed by n900-lid), then turns the keyboard LEDs off.
+STATEDIR=/run/n900-lid
+KBD_ON_SECS=10
+while :; do
+	sleep 2
+	last=$(cat "$STATEDIR/kbd.last" 2>/dev/null || echo 0)
+	now=$(date +%s)
+	[ $((now - last)) -ge "$KBD_ON_SECS" ] && break
+done
+for i in 1 2 3 4 5 6; do
+	echo 0 > "/sys/class/leds/lp5523:kb$i/brightness" 2>/dev/null
+done
+rm -f "$STATEDIR/kbd.on"

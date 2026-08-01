@@ -1,0 +1,6 @@
+#!/bin/sh
+# Set the display backlight to maximum at boot.
+# The acx565akm panel comes up near zero, which looks like a dead screen.
+BL=/sys/class/backlight/acx565akm/brightness
+MAX=/sys/class/backlight/acx565akm/max_brightness
+[ -w "$BL" ] && cat "$MAX" > "$BL"

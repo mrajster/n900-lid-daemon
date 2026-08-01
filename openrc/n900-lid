@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+
+name="n900-lid"
+description="Lock, blank and suspend the N900 based on the keyboard slider"
+command="/usr/local/bin/n900-lid"
+command_background="yes"
+pidfile="/run/n900-lid.pid"
+
+depend() {
+	need localmount
+	after xdm display-manager
+}

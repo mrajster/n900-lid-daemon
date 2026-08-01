@@ -1,0 +1,185 @@
+#!/bin/sh
+# n900-lid — slider drives screen power, input, lock and suspend.
+#   open  -> unlock, touch on, screen on (single transition, no flash), no suspend
+#   close -> lock, touch off, screen off, suspend after SUSPEND_AFTER s
+# evtest --query exit code: 10 = slider OPEN, 0 = closed (verified on hardware).
+# v5 2026-08-01: s2idle suspend WORKS (kernel 7.1.5-r1 i2c-omap revert).
+# Closed for SUSPEND_AFTER s with no SSH and no apk -> s2idle (echo freeze).
+# Slider/power/RTC wake it; guards hold it awake while SSH or apk active,
+# falling back to the old WiFi-off deep idle after WIFI_OFF_AFTER s.
+
+EVDEV=/dev/input/event4
+BL=/sys/class/backlight/acx565akm/brightness
+MAXBL=/sys/class/backlight/acx565akm/max_brightness
+FB=/sys/devices/platform/omapdrm.0/graphics/fb0/blank
+TOUCH="TSC2005 touchscreen"
+WIFI_OFF_AFTER=600
+# Seconds of closed-lid before s2idle suspend. 0 = never suspend.
+# ONLY enable (>0) with a kernel that survives suspend! Mainline i2c-omap
+# crashes at suspend entry on OMAP3 — see:
+# https://github.com/mrajster/n900-pmos-suspend-fix
+SUSPEND_AFTER=0
+XUSER=user
+XAUTH=/home/user/.Xauthority
+STATEDIR=/run/n900-lid
+TIMER_PID="$STATEDIR/timer.pid"
+
+mkdir -p "$STATEDIR"
+
+log() { logger -t n900-lid "$*"; }
+
+as_user() {
+	su -s /bin/sh "$XUSER" -c "LANG=C.UTF-8 LC_ALL=C.UTF-8 ENV=/home/user/.ashrc DISPLAY=:0 XAUTHORITY=$XAUTH $*" 2>/dev/null
+}
+
+kbd_backlight() {
+	for i in 1 2 3 4 5 6; do
+		[ -w "/sys/class/leds/lp5523:kb$i/brightness" ] &&
+			echo "$1" > "/sys/class/leds/lp5523:kb$i/brightness" 2>/dev/null
+	done
+}
+
+KBD_BL=100
+
+# Light the keyboard for 10s (n900-kbd-dim watches the timestamp).
+kbd_on_temp() {
+	date +%s > "$STATEDIR/kbd.last"
+	if [ ! -f "$STATEDIR/kbd.on" ]; then
+		touch "$STATEDIR/kbd.on"
+		kbd_backlight "$KBD_BL"
+		setsid /usr/local/bin/n900-kbd-dim &
+	fi
+}
+
+slider_open() {
+	evtest --query "$EVDEV" EV_SW SW_KEYPAD_SLIDE
+	[ "$?" -eq 10 ]
+}
+
+screen_on() {
+	# Prepare everything while still dark, raise backlight last — one clean
+	# transition instead of the old backlight-first double flash.
+	[ "$(cat "$FB" 2>/dev/null)" = "0" ] || echo 0 > "$FB" 2>/dev/null
+	as_user "xset dpms 0 0 0; xset s off; xset s noblank; xset dpms force on; xinput enable '$TOUCH'"
+	[ -r "$MAXBL" ] && cat "$MAXBL" > "$BL" 2>/dev/null
+}
+
+screen_off() {
+	as_user "xinput disable '$TOUCH'; xset dpms force off"
+	echo 1 > "$FB" 2>/dev/null
+	echo 0 > "$BL" 2>/dev/null
+	kbd_backlight 0
+}
+
+lock() {
+	pgrep -x i3lock >/dev/null 2>&1 || as_user "i3lock -c 000000"
+}
+
+unlock() {
+	pkill -x i3lock 2>/dev/null
+}
+
+stop_timer() {
+	# Timer runs in its own process group (setsid); negative PID kills the
+	# group including the sleep — busybox sh never delivers a plain kill to
+	# subshell children, which used to leak orphaned sleeps.
+	if [ -f "$TIMER_PID" ]; then
+		kill -TERM -- -"$(cat "$TIMER_PID")" 2>/dev/null
+		rm -f "$TIMER_PID"
+	fi
+}
+
+start_timer() {
+	stop_timer
+	setsid sh -c '
+		t=0
+		while :; do
+			sleep 60; t=$((t+60))
+			evtest --query '"$EVDEV"' EV_SW SW_KEYPAD_SLIDE
+			[ "$?" -eq 10 ] && exit 0
+			# guards: never sleep under an SSH session or a running upgrade
+			if netstat -tn 2>/dev/null | grep ":22 " | grep -q ESTABLISHED || pgrep -x apk >/dev/null 2>&1; then
+				# guarded fallback: old deep-idle path, WiFi off after WIFI_OFF_AFTER
+				if [ $t -ge '"$WIFI_OFF_AFTER"' ] && [ ! -f /run/n900-lid/wifi.off ] && ! netstat -tn 2>/dev/null | grep ":22 " | grep -q ESTABLISHED; then
+					logger -t n900-lid "closed, guarded: wifi off (deep idle)"
+					touch /run/n900-lid/wifi.off
+					nmcli radio wifi off 2>/dev/null
+				fi
+				continue
+			fi
+			if [ '"$SUSPEND_AFTER"' -gt 0 ] && [ $t -ge '"$SUSPEND_AFTER"' ]; then
+				logger -t n900-lid "closed ${t}s: s2idle suspend"
+				sync
+				echo freeze > /sys/power/state
+				logger -t n900-lid "woke from s2idle"
+				evtest --query '"$EVDEV"' EV_SW SW_KEYPAD_SLIDE
+				[ "$?" -eq 10 ] && exit 0
+				t=0
+			fi
+		done' &
+	echo $! > "$TIMER_PID"
+}
+
+on_open() {
+	log "slider opened"
+	stop_timer
+	if [ -f "$STATEDIR/wifi.off" ]; then
+		nmcli radio wifi on 2>/dev/null
+		rm -f "$STATEDIR/wifi.off"
+		log "wifi restored"
+	fi
+	unlock
+	screen_on
+	kbd_on_temp
+}
+
+on_close() {
+	log "slider closed"
+	lock
+	screen_off
+	pkill -x n900-kbd-dim 2>/dev/null
+	rm -f "$STATEDIR/kbd.on"
+	start_timer
+}
+
+# Startup: force a known-good state.
+if slider_open; then
+	stop_timer
+	unlock
+	screen_on
+else
+	on_close
+fi
+
+# Keyboard watcher: any keypress lights the kb LEDs for 10s.
+KBDEV=$(awk '/^N: Name=.*([Kk]eypad|TWL4030)/{f=1} f && /^H: Handlers=/{for(i=1;i<=NF;i++) if($i~/^event/){print "/dev/input/"$i; exit}}' /proc/bus/input/devices)
+if [ -n "$KBDEV" ] && [ "$KBDEV" != "$EVDEV" ]; then
+	(
+		while :; do
+			evtest "$KBDEV" 2>/dev/null | while read -r line; do
+				case "$line" in
+					*"(EV_KEY)"*"value 1") kbd_on_temp ;;
+				esac
+			done
+			sleep 2
+		done
+	) &
+	log "keyboard backlight watcher on $KBDEV"
+else
+	log "WARNING: keyboard event device not found, kb backlight watcher off"
+fi
+
+# Follow slider events forever; restart evtest if it ever dies.
+while true; do
+	evtest "$EVDEV" 2>/dev/null | while read -r line; do
+		case "$line" in
+			*SW_KEYPAD_SLIDE*"value 1") on_open ;;
+			*SW_KEYPAD_SLIDE*"value 0") on_close ;;
+			# KEY_SCREENLOCK (the lock slide on the left edge) also arrives on
+			# this device — hook your own action here if you want one:
+			# *KEY_SCREENLOCK*"value 1") log "lock-slide"; as_user "your-command &" ;;
+		esac
+	done
+	log "evtest exited, restarting in 2s"
+	sleep 2
+done
